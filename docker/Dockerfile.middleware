@@ -1,10 +1,14 @@
-# docker/Dockerfile.middleware
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3
 FROM ${BASE_IMAGE}
 
 # === 集成 uv ===
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+# 告诉 uv 使用系统 Python
 ENV UV_SYSTEM_PYTHON=1
+
+# === 关键修复: 解除 PEP 668 限制 ===
+# 必须删除这个标记文件，否则 pip/uv 无法向系统路径安装包
+RUN rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
 
 # 定义参数
 ARG FLASH_ATTN_VERSION=v2.8.3
@@ -12,9 +16,8 @@ ARG DEEPSPEED_VERSION=master
 # 针对常见架构 + 你的 DGX GB10 (9.0)
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 
-# === 关键优化 ===
-# 在 QEMU 环境下，并行度过高会直接死机
-# 我们在 Dockerfile 设置默认值，但 CI 中会通过 build-arg 进一步限制
+# === 编译优化 ===
+# 默认限制并发，防止 QEMU OOM
 ENV MAX_JOBS=2
 ENV FLASH_ATTENTION_FORCE_BUILD=TRUE
 ENV DS_BUILD_OPS=1
@@ -25,11 +28,13 @@ WORKDIR /tmp
 RUN apt-get update && apt-get install -y git ninja-build libaio-dev && rm -rf /var/lib/apt/lists/*
 
 # 2. Flash-Attention 2
+# 注意：增加 uv cache clean 减少镜像体积
 RUN git clone https://github.com/Dao-AILab/flash-attention.git && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_VERSION} && \
     uv pip install . --no-build-isolation && \
-    cd .. && rm -rf flash-attention && \
+    cd .. && \
+    rm -rf flash-attention && \
     uv cache clean
 
 # 3. DeepSpeed
@@ -37,10 +42,12 @@ RUN git clone https://github.com/microsoft/DeepSpeed.git && \
     cd DeepSpeed && \
     git checkout ${DEEPSPEED_VERSION} && \
     DS_BUILD_SPARSE_ATTN=0 DS_BUILD_CPU_ADAM=1 uv pip install . --global-option="build_ext" --global-option="-j2" && \
-    cd .. && rm -rf DeepSpeed && \
+    cd .. && \
+    rm -rf DeepSpeed && \
     uv cache clean
 
 # 4. Bitsandbytes
-RUN uv pip install bitsandbytes --prefer-binary
+RUN uv pip install bitsandbytes --prefer-binary && uv cache clean
 
+# 验证安装
 RUN python -c "import flash_attn; print('FlashAttn installed:', flash_attn.__version__)"
