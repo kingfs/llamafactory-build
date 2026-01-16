@@ -1,34 +1,37 @@
+# docker/Dockerfile.middleware
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3
 FROM ${BASE_IMAGE}
 
-# === 集成 uv ===
+# === 1. 环境准备 (集成 uv + 解除 PEP668) ===
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
-# 告诉 uv 使用系统 Python
 ENV UV_SYSTEM_PYTHON=1
-
-# === 关键修复: 解除 PEP 668 限制 ===
-# 必须删除这个标记文件，否则 pip/uv 无法向系统路径安装包
+# 关键：允许 pip/uv 向系统路径安装包
 RUN rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
 
-# 定义参数
+# === 2. 定义版本和架构 ===
 ARG FLASH_ATTN_VERSION=v2.8.3
 ARG DEEPSPEED_VERSION=master
-# 针对常见架构 + 你的 DGX GB10 (9.0)
-ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 
-# === 编译优化 ===
-# 默认限制并发，防止 QEMU OOM
-ENV MAX_JOBS=2
+# 默认架构列表 (CI 中会根据 amd64/arm64 传入不同的值覆盖这里)
+# 8.0=A100, 8.6=3090, 8.9=4090, 9.0=H100/GB200
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+# === 3. 编译参数优化 ===
+# 原生 Runner 性能较好，MAX_JOBS 可以给到 4
+ENV MAX_JOBS=4
 ENV FLASH_ATTENTION_FORCE_BUILD=TRUE
+# 开启 DeepSpeed 预编译 (Build Ops)
 ENV DS_BUILD_OPS=1
+ENV DS_BUILD_SPARSE_ATTN=0
+ENV DS_BUILD_CPU_ADAM=1
 
 WORKDIR /tmp
 
-# 1. 基础工具
+# === 4. 安装基础库 ===
 RUN apt-get update && apt-get install -y git ninja-build libaio-dev && rm -rf /var/lib/apt/lists/*
 
-# 2. Flash-Attention 2
-# 注意：增加 uv cache clean 减少镜像体积
+# === 5. 编译 Flash-Attention 2 ===
 RUN git clone https://github.com/Dao-AILab/flash-attention.git && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_VERSION} && \
@@ -37,17 +40,18 @@ RUN git clone https://github.com/Dao-AILab/flash-attention.git && \
     rm -rf flash-attention && \
     uv cache clean
 
-# 3. DeepSpeed
+# === 6. 编译 DeepSpeed ===
 RUN git clone https://github.com/microsoft/DeepSpeed.git && \
     cd DeepSpeed && \
     git checkout ${DEEPSPEED_VERSION} && \
-    DS_BUILD_SPARSE_ATTN=0 DS_BUILD_CPU_ADAM=1 uv pip install . --global-option="build_ext" --global-option="-j2" && \
+    # 使用 uv 安装，依赖解析更快
+    uv pip install . && \
     cd .. && \
     rm -rf DeepSpeed && \
     uv cache clean
 
-# 4. Bitsandbytes
+# === 7. 安装 Bitsandbytes ===
 RUN uv pip install bitsandbytes --prefer-binary && uv cache clean
 
-# 验证安装
-RUN python -c "import flash_attn; print('FlashAttn installed:', flash_attn.__version__)"
+# 验证
+RUN python -c "import torch; print('Arch List:', torch.cuda.get_arch_list()); import flash_attn; print('FlashAttn:', flash_attn.__version__)"

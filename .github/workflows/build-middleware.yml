@@ -1,7 +1,7 @@
-name: Build Middleware (Base Infrastructure)
+name: Build Middleware (Base)
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
   push:
     paths:
       - 'docker/Dockerfile.middleware'
@@ -15,53 +15,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [linux/amd64, linux/arm64]
+        include:
+          # === AMD64 ===
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            # 编译主流显卡架构
+            arch_list: "8.0;8.6;8.9;9.0"
+            
+          # === ARM64 (Native) ===
+            # GitHub 原生 ARM Runner
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm 
+            # 针对 DGX Spark (GB10/GH200)，只编译 9.0 极速构建
+            # 如果想兼容 Grace-Hopper A100，可改为 "8.0;9.0"
+            arch_list: "9.0"
 
-    runs-on: ubuntu-latest
-    # 编译时间较长，设置 6 小时超时
-    timeout-minutes: 360
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120 # 原生跑得快，2小时绰绰有余
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # === 核心修复步骤：极致清理磁盘空间 ===
-      # GitHub Runner 预装了太多东西，我们构建 Docker 不需要它们
-      # 使用这个 Action 可以释放约 20-30GB 的空间
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          # 删除预装的大型工具
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true # 删除预缓存的 Docker 镜像 (我们会拉取自己的)
-          swap-storage: false # 我们下面自己手动管理 Swap
-
-      # === 核心修复步骤：创建适量 Swap ===
-      # 10GB 太大，容易导致磁盘满；6GB 配合清理出的空间是最佳平衡点
-      - name: Create Swap (6GB)
-        run: |
-          echo "Before cleanup and swap:"
-          df -h
-          
-          # 创建 6GB Swap
-          sudo fallocate -l 6G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          
-          echo "After swap creation:"
-          free -h
-          df -h
-
-      # 配置 QEMU (用于支持 ARM64)
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
+      # 移除 QEMU 设置，移除磁盘清理，移除 Swap -> 极其清爽！
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -78,18 +54,17 @@ jobs:
         with:
           images: ${{ env.REGISTRY_IMAGE }}
 
-      - name: Build and Push by Digest
+      - name: Build and Push
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           file: docker/Dockerfile.middleware
           platforms: ${{ matrix.platform }}
-          # 限制并发，防止内存爆炸
+          # 传入架构参数
           build-args: |
-            MAX_JOBS=1
+            TORCH_CUDA_ARCH_LIST=${{ matrix.arch_list }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          # 缓存设置
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
@@ -102,7 +77,7 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.platform }} # 使用 platform 名字作为 artifact 区分
+          name: digests-${{ matrix.platform }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -132,6 +107,6 @@ jobs:
         run: |
           docker buildx imagetools create -t ${{ env.REGISTRY_IMAGE }}:${{ env.TAG_NAME }} \
             $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
-
+      
       - name: Inspect image
         run: docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ env.TAG_NAME }}

@@ -1,9 +1,9 @@
-name: Build App (Release by Tag)
+name: Build App (Release)
 
 on:
   push:
     tags:
-      - 'v*' # 仅在推送 v1.0.0, v2.0 等 tag 时触发
+      - 'v*' # 仅在推送 tag 时触发
 
 env:
   REGISTRY_IMAGE: kingfs/llamafactory
@@ -13,29 +13,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm # 原生 ARM
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # 即使只是 pip install，在 amd64 机器上跑 arm64 容器也需要 QEMU
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY_IMAGE }}
-          # 自动生成 latest 和 tag 版本
           tags: |
             type=raw,value=latest
             type=ref,event=tag
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -43,20 +43,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and Push by Digest
+      - name: Build and Push
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           file: docker/Dockerfile.app
           platforms: ${{ matrix.platform }}
-          # 必须指明使用我们构建好的 middleware
           build-args: |
             BASE_IMAGE=${{ env.REGISTRY_IMAGE }}:middleware
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
       - name: Export digest
         run: |
@@ -101,6 +100,7 @@ jobs:
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
+          # 自动合并 latest 和 vX.X.X tag
           docker buildx imagetools create $(echo "${{ steps.meta.outputs.tags }}" | xargs -I {} echo -t {}) \
             $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
 
