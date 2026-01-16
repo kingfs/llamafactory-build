@@ -4,7 +4,7 @@ on:
   workflow_dispatch: # 手动触发
   push:
     paths:
-      - 'docker/Dockerfile.middleware' # 仅当基础镜像定义改变时触发
+      - 'docker/Dockerfile.middleware'
 
 env:
   REGISTRY_IMAGE: kingfs/llamafactory
@@ -15,33 +15,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 并行构建双架构
         platform: [linux/amd64, linux/arm64]
 
     runs-on: ubuntu-latest
-    # 设置较长的超时时间，因为 QEMU 模拟 ARM64 编译 CUDA 真的很慢 (可能 2-4 小时)
-    timeout-minutes: 360 
+    # 编译时间较长，设置 6 小时超时
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # === 关键步骤：清理磁盘并创建 Swap ===
-      # GitHub Runner 只有 7GB RAM，编译 FlashAttn 必挂。
-      # 这里我们清理出空间，并挂载 10GB 的 Swap 文件，用磁盘换内存。
-      - name: Free Disk Space & Create Swap (Fix OOM)
+      # === 核心修复步骤：极致清理磁盘空间 ===
+      # GitHub Runner 预装了太多东西，我们构建 Docker 不需要它们
+      # 使用这个 Action 可以释放约 20-30GB 的空间
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # 删除预装的大型工具
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true # 删除预缓存的 Docker 镜像 (我们会拉取自己的)
+          swap-storage: false # 我们下面自己手动管理 Swap
+
+      # === 核心修复步骤：创建适量 Swap ===
+      # 10GB 太大，容易导致磁盘满；6GB 配合清理出的空间是最佳平衡点
+      - name: Create Swap (6GB)
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          echo "Before cleanup and swap:"
+          df -h
           
-          # 创建 10GB Swap
-          sudo fallocate -l 10G /swapfile
+          # 创建 6GB Swap
+          sudo fallocate -l 6G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          
+          echo "After swap creation:"
           free -h
+          df -h
 
       # 配置 QEMU (用于支持 ARM64)
       - name: Set up QEMU
@@ -71,11 +85,11 @@ jobs:
           context: .
           file: docker/Dockerfile.middleware
           platforms: ${{ matrix.platform }}
-          # 针对 ARM64 进一步限制并发，确保稳定
+          # 限制并发，防止内存爆炸
           build-args: |
             MAX_JOBS=1
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          # 使用 GitHub Cache 加速后续构建
+          # 缓存设置
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
@@ -88,12 +102,11 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.platform }}
+          name: digests-${{ matrix.platform }} # 使用 platform 名字作为 artifact 区分
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  # 合并两个架构的镜像到一个 Tag
   merge-manifest:
     runs-on: ubuntu-latest
     needs: build-digest
@@ -117,7 +130,6 @@ jobs:
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          # 创建 kingfs/llamafactory:middleware
           docker buildx imagetools create -t ${{ env.REGISTRY_IMAGE }}:${{ env.TAG_NAME }} \
             $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
 

@@ -29,14 +29,16 @@ RUN git clone https://github.com/Dao-AILab/flash-attention.git && \
     cd flash-attention && \
     git checkout ${FLASH_ATTN_VERSION} && \
     uv pip install . --no-build-isolation && \
-    cd .. && rm -rf flash-attention
+    cd .. && rm -rf flash-attention && \
+    uv cache clean
 
 # 3. DeepSpeed
 RUN git clone https://github.com/microsoft/DeepSpeed.git && \
     cd DeepSpeed && \
     git checkout ${DEEPSPEED_VERSION} && \
     DS_BUILD_SPARSE_ATTN=0 DS_BUILD_CPU_ADAM=1 uv pip install . --global-option="build_ext" --global-option="-j2" && \
-    cd .. && rm -rf DeepSpeed
+    cd .. && rm -rf DeepSpeed && \
+    uv cache clean
 
 # 4. Bitsandbytes
 RUN uv pip install bitsandbytes --prefer-binary
