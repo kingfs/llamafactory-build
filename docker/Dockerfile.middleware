@@ -3,11 +3,6 @@ ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
-
-ADD http://s3-ephemeral.in.chaitin.net/dev/Chaitin_Ltd_Root_CA.pem /usr/local/share/ca-certificates/chaitin-ca.crt
-RUN sed -E -i -e 's/(archive|ports).ubuntu.com/mirror.dev.in.chaitin.net/g' -e '/security.ubuntu.com/d' /etc/apt/sources.list && \
-    update-ca-certificates
-
 ENV PIP_ROOT_USER_ACTION=ignore
 
 # === 1. 环境准备 (集成 uv + 解除 PEP668) ===
@@ -20,8 +15,7 @@ RUN rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
 RUN apt-get update && apt-get install -y git ninja-build libaio-dev && rm -rf /var/lib/apt/lists/*
 
 # === 7. 安装 Bitsandbytes ===
-RUN uv pip install bitsandbytes cugraph-dgl-cu12 cugraph-pyg-cu12 deepspeed editables hatchling megatron-core && \
-    uv cache clean
+RUN pip install --no-cache-dir bitsandbytes cugraph-dgl-cu12 cugraph-pyg-cu12 deepspeed editables hatchling megatron-core
 
 # 验证
 RUN python -c "import torch; print('Arch List:', torch.cuda.get_arch_list()); import flash_attn; print('FlashAttn:', flash_attn.__version__)"
